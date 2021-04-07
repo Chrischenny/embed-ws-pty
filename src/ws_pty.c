@@ -26,7 +26,6 @@ struct io_buf{
 
 struct pty_poll_data{
     int pty;
-    char username[MAX_USERNAME_LENGTH];
     struct io_buf pty_out_buf;
 };
 
@@ -218,7 +217,32 @@ static void mongoose_ws_callback(struct mg_connection *conn, int ev, void *ev_da
                 memset((void *)pty_data, 0, sizeof(*pty_data));
                 pty_data->pty = -1;
                 conn->fn_data = (void *)pty_data;
-                mg_ws_upgrade(conn, hm, "login:");
+                mg_ws_upgrade(conn, hm, NULL);
+                global_pid = forkpty(&pty_data->pty, NULL, NULL, NULL);
+                if (global_pid == 0)// child process
+                {
+                    /*
+                        * warning :every incoming ws connection will fork a child process
+                        * and copy the variable and the memroy from the father process.
+                        * because of this, we need to free data and memory child process
+                        * doesn't need. but it is not a good solution, the more incoming
+                        * connetions are,the more memory consumption will waste while copy to
+                        * child process, cause mongoose will keep every acitve connetion.
+                        * so, the less connections are,the better to the embed system; 
+                        */
+
+                    /* judge every poll terms if,child stop the mongoose poll
+                        * we should exec the /bin/login after the mongoose stop
+                        */
+                    child_process_flags = true; 
+                    //copy the login user to the child global variable
+                    close(pty_data->pty);
+                    free_pty_data(conn);
+                }
+                else if(global_pid < 0)
+                {
+                    mg_ws_send(conn, "Internal Error", sizeof("Internal Error"), WEBSOCKET_OP_CLOSE);
+                }
             }
         }
     case MG_EV_WS_MSG:
@@ -226,68 +250,15 @@ static void mongoose_ws_callback(struct mg_connection *conn, int ev, void *ev_da
             struct pty_poll_data *pty_data = (struct pty_poll_data *)fn_data;
             int pty = pty_data->pty;
             struct mg_ws_message *ws_msg = (struct mg_ws_message *)ev_data;
-            if (pty < 0) //means that not finish authenticate
+            if (!flush_pty(pty, ws_msg))
             {
-                switch (pty_authenticate(ws_msg, pty_data->username))
-                {
-                case PTY_AUTH_CONTINUE:
-                    {
-                        mg_ws_send(conn, ws_msg->data.ptr, ws_msg->data.len, WEBSOCKET_OP_TEXT);
-                        break;
-                    }
-                case PTY_AUTU_NAME_TOO_LONG:
-                    {
-                        mg_ws_send(conn, "username too long", sizeof("username too long"), WEBSOCKET_OP_CLOSE);
-                        conn->is_draining = 1;
-                        break;
-                    }
-                case PTY_AUTH_FINISH:
-                    {
-                        global_pid = forkpty(pty, NULL, NULL, NULL);
-                        if (global_pid == 0)// child process
-                        {
-                            /*
-                             * warning :every incoming ws connection will fork a child process
-                             * and copy the variable and the memroy from the father process.
-                             * because of this, we need to free data and memory child process
-                             * doesn't need. but it is not a good solution, the more incoming
-                             * connetions are,the more memory consumption will waste while copy to
-                             * child process, cause mongoose will keep every acitve connetion.
-                             * so, the less connections are,the better to the embed system; 
-                             */
-
-                            /* judge every poll terms if,child stop the mongoose poll
-                             * we should exec the /bin/login after the mongoose stop
-                             */
-                            child_process_flags = true; 
-                            //copy the login user to the child global variable
-                            strncpy(child_username, pty_data->username, strlen(pty_data->username));
-                            close(pty_data->pty);
-                            free_pty_data(conn);
-                        }
-                        else if(global_pid < 0)
-                        {
-                            mg_ws_send(conn, "Internal Error", sizeof("Internal Error"), WEBSOCKET_OP_CLOSE);
-                        }
-                        break;
-                    }
-                default:
-                    break;
-                }
-                
+                mg_ws_send(conn, "oops, something wrong with server,please reconnect"
+                            , sizeof("oops, something wrong with server,please reconnect"), WEBSOCKET_OP_TEXT);
+                conn->is_draining = 1;
+                //fixed : how to stop pts process？
+                close(pty);
             }
-            else
-            {
-                if (!flush_pty(pty, ws_msg))
-                {
-                    mg_ws_send(conn, "oops, something wrong with server,please reconnect"
-                                , sizeof("oops, something wrong with server,please reconnect"), WEBSOCKET_OP_TEXT);
-                    conn->is_draining = 1;
-                    //fixed : how to stop pts process？
-                    close(pty);
-                }
-                break;
-            }
+            break; 
         }
     case MG_EV_POLL:
         {
@@ -321,6 +292,16 @@ static void mongoose_ws_callback(struct mg_connection *conn, int ev, void *ev_da
     default:
         break;
     }
+}
+
+
+/**
+ * @brief 
+ * 
+ */
+void start_login()
+{
+    execl("/bin/login", "login", "-p", NULL);
 }
 
 

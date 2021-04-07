@@ -25,4 +25,4 @@
  * @brief 运行websocket-pty服务器
  * 
  */
-void pty_ws_run();
+int pty_ws_run();
